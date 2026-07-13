@@ -4,8 +4,13 @@ Base experience is fully server-rendered and JS-free: browse precomputed
 `paper_dossiers`, and a plain `POST /audit` returns a complete result page
 (crawlable, works with JS off). On top of that, a progressive enhancement: if JS
 is on, the form streams instead, scoring item by item (sections for a paper,
-paragraphs for pasted text) with cards that slide in, stabilo-style highlights on
-the flagged words, and the plain-language feedback typed in as the LLM writes it.
+paragraphs for pasted text) with rows that slide into a document pane, stabilo
+highlights on the flagged words, and the plain-language feedback typed in as the
+LLM writes it.
+
+One review layout everywhere: document on the left, a sticky score rail on the
+right. Stored dossiers, live audits, and the no-JS fallback all render through
+the same builders, so the three paths cannot drift apart.
 
 Signal, not verdict, enforced in the explanation prompt. One tell family
 (stylometric polish). Only token-level tells are highlighted; distributional
@@ -14,6 +19,7 @@ ones have no single locus and are left unmarked on purpose.
 import asyncio
 import html
 import json
+import math
 import os
 import re
 import sys
@@ -39,71 +45,99 @@ ENGINE = {"auditor": None, "client": None, "ready": False, "note": ""}
 REFRESH_S = 600
 
 CSS = """
-*{box-sizing:border-box} body{margin:0;background:#0E1117;color:#E6E8EB;
+*{box-sizing:border-box} body{margin:0;background:#F4F5F7;color:#1B2430;
  font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-a{color:#4Fd1a8;text-decoration:none} a:hover{text-decoration:underline}
-.wrap{max-width:960px;margin:0 auto;padding:24px 18px 64px}
+a{color:#0B7C5D;text-decoration:none} a:hover{text-decoration:underline}
+.wrap{max-width:1060px;margin:0 auto;padding:24px 18px 64px}
 h1{font-size:1.5rem;margin:0 0 2px} h2{font-size:1.05rem;margin:24px 0 10px}
-.sub{color:#8B93A0;margin:0 0 18px}
-.band{border-left:5px solid #1EB182;background:#141A22;padding:12px 16px;
- border-radius:6px;margin:0 0 20px;font-size:.92rem;color:#C7CEd8} .band b{color:#E6E8EB}
-form.audit{margin:0 0 14px} textarea{width:100%;min-height:120px;background:#0B0F15;
- color:#E6E8EB;border:1px solid #2A333F;border-radius:8px;padding:12px;font:inherit;resize:vertical}
+.sub{color:#5D6875;margin:0 0 16px}
+.band{border-left:5px solid #0E9A73;background:#EDF4F0;padding:12px 16px;
+ border-radius:6px;margin:0 0 20px;font-size:.92rem;color:#41505E} .band b{color:#1B2430}
+form.audit{margin:0 0 10px} textarea{width:100%;min-height:120px;background:#FFFFFF;
+ color:#1B2430;border:1px solid #D5DBE2;border-radius:8px;padding:12px;font:inherit;resize:vertical}
 .row{display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap}
-button{background:#1EB182;color:#08120D;border:none;font-weight:700;padding:9px 18px;
- border-radius:8px;cursor:pointer;font:inherit} button:hover{background:#28c493}
+button{background:#0E9A73;color:#fff;border:none;font-weight:700;padding:9px 18px;
+ border-radius:8px;cursor:pointer;font:inherit} button:hover{background:#0B8563}
 button:disabled{opacity:.5;cursor:default}
-.hint{color:#8B93A0;font-size:.85rem}
+.hint{color:#5D6875;font-size:.85rem}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:0 0 18px}
+.tile{background:#FFFFFF;border:1px solid #E3E7EC;border-radius:10px;padding:12px 14px}
+.tile .v{font-size:1.7rem;font-weight:700;line-height:1.2} .tile .l{color:#5D6875;font-size:.8rem}
+.cats{margin:0 0 12px} .cats a{display:inline-block;background:#FFFFFF;border:1px solid #D5DBE2;
+ color:#41505E;padding:2px 10px;margin:2px 6px 2px 0;border-radius:12px;font-size:.8rem}
+.cats a.on{border-color:#0E9A73;color:#0B7C5D}
 table{width:100%;border-collapse:collapse;font-size:.92rem}
-th,td{text-align:left;padding:9px 10px;border-bottom:1px solid #222A34}
-th{color:#8B93A0;font-weight:600} tr:hover td{background:#141A22}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid #E3E7EC}
+th{color:#5D6875;font-weight:600} th a{color:inherit} th a.on{color:#1B2430} tr:hover td{background:#EDF0F3}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
-.bar{display:inline-block;height:8px;border-radius:4px;vertical-align:middle;transition:width .5s ease}
+.bar{display:inline-block;width:90px;height:8px;border-radius:4px;background:#E3E7EC;
+ vertical-align:middle;overflow:hidden}
+.bar i{display:block;height:100%;border-radius:4px;background:#2E8F70;transition:width .5s ease}
+.bar.hot i{background:#C0394B}
 .badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:.78rem;font-weight:600}
-.flag{background:#3a1d1d;color:#f0a4a4} .ok{background:#16281f;color:#7fd6ab}
-.warn{background:#2e2716;color:#e0c879}
-.pill{display:inline-block;background:#1A2029;border:1px solid #2A333F;color:#B9c2cE;
+.flag{background:#FBE9EB;color:#A32536} .ok{background:#E6F5EE;color:#14804A}
+.warn{background:#FBF3DC;color:#8A6D1A}
+.pill{display:inline-block;background:#F0F2F5;border:1px solid #DDE2E8;color:#41505E;
  padding:1px 8px;margin:2px 4px 2px 0;border-radius:10px;font-size:.8rem}
-.contrib{color:#e0a0a0} .neg{color:#8fb0d0} .muted{color:#8B93A0}
-.sec{border:1px solid #222A34;border-radius:8px;padding:14px 16px;margin:12px 0;background:#11161D}
-.sec.flagged{border-color:#4a2a2a} .sec h3{margin:0 0 6px;font-size:1rem}
-.exc{color:#c3ccd6;font-size:.9rem;margin-top:8px;border-left:2px solid #2A333F;padding-left:10px}
-.feedback{background:#101a16;border:1px solid #1d3a2e;border-radius:10px;padding:16px 18px;
- margin:12px 0;font-size:.98rem;line-height:1.6;white-space:pre-wrap}
-.score{font-size:2.2rem;font-weight:800;font-variant-numeric:tabular-nums}
-.foot{color:#6b7480;font-size:.82rem;margin-top:36px;border-top:1px solid #222A34;padding-top:14px}
-/* stabilo-style highlights: translucent marker over the flagged token */
+.pill[data-spot]{cursor:pointer} .pill[data-spot]:hover{border-color:#AAB4BF}
+.pill.on{border-color:#0E9A73;color:#0B7C5D}
+.contrib{color:#A32536} .neg{color:#2A6FA8} .muted{color:#5D6875}
+.review{background:#EDF6F1;border:1px solid #CBE3D7;border-radius:10px;padding:14px 16px;margin:6px 0;
+ white-space:pre-wrap;line-height:1.6;font-size:.92rem}
+.score{font-size:2.2rem;font-weight:800}
+.foot{color:#7A8592;font-size:.82rem;margin-top:36px;border-top:1px solid #E3E7EC;padding-top:14px}
 /* stabilo highlights, layered by signal strength: l3 marker, l2 wash, l1 underline */
 mark[class^=hl-]{padding:0 .12em;border-radius:3px;box-decoration-break:clone;
  -webkit-box-decoration-break:clone;background:none;color:inherit}
-.l3{color:#0c0f13;font-weight:600}
-.hl-transition.l3{background:#ffe14d} .hl-transition.l2{background:rgba(255,225,77,.30)} .hl-transition.l1{border-bottom:2px dotted #ffe14d}
-.hl-booster.l3{background:#ff9de0} .hl-booster.l2{background:rgba(255,157,224,.30)} .hl-booster.l1{border-bottom:2px dotted #ff9de0}
-.hl-hedge.l3{background:#8affc1} .hl-hedge.l2{background:rgba(138,255,193,.28)} .hl-hedge.l1{border-bottom:2px dotted #8affc1}
-.hl-dash.l3{background:#8fd0ff} .hl-dash.l2{background:rgba(143,208,255,.30)} .hl-dash.l1{border-bottom:2px dotted #8fd0ff}
-.hl-punc.l3{background:#ffc07a} .hl-punc.l2{background:rgba(255,192,122,.30)} .hl-punc.l1{border-bottom:2px dotted #ffc07a}
-.legend{font-size:.8rem;color:#8B93A0;margin:6px 0 2px} .legend mark{margin-right:2px}
+.l3{color:#141A20;font-weight:600}
+.hl-transition.l3{background:#ffe14d} .hl-transition.l2{background:rgba(255,225,77,.45)} .hl-transition.l1{border-bottom:2px dotted #d9b902}
+.hl-booster.l3{background:#ff9de0} .hl-booster.l2{background:rgba(255,157,224,.40)} .hl-booster.l1{border-bottom:2px dotted #e35db8}
+.hl-hedge.l3{background:#7df0b2} .hl-hedge.l2{background:rgba(125,240,178,.40)} .hl-hedge.l1{border-bottom:2px dotted #1eae66}
+.hl-dash.l3{background:#8fd0ff} .hl-dash.l2{background:rgba(143,208,255,.45)} .hl-dash.l1{border-bottom:2px dotted #2f8ed6}
+.hl-punc.l3{background:#ffc07a} .hl-punc.l2{background:rgba(255,192,122,.45)} .hl-punc.l1{border-bottom:2px dotted #e08b2d}
+.legend{font-size:.8rem;color:#5D6875;margin:6px 0 2px} .legend mark{margin-right:2px}
+/* spotlight: clicking a locatable tell pill dims every mark except that family */
+.doc[data-spot] mark[class^=hl-]{background:none;border-bottom:none;color:inherit;font-weight:400;opacity:.85}
+.doc[data-spot=transition] mark.hl-transition{background:#ffe14d;color:#141A20;font-weight:600;opacity:1}
+.doc[data-spot=booster] mark.hl-booster{background:#ff9de0;color:#141A20;font-weight:600;opacity:1}
+.doc[data-spot=hedge] mark.hl-hedge{background:#7df0b2;color:#141A20;font-weight:600;opacity:1}
+.doc[data-spot=dash] mark.hl-dash{background:#8fd0ff;color:#141A20;font-weight:600;opacity:1}
+.doc[data-spot=punc] mark.hl-punc{background:#ffc07a;color:#141A20;font-weight:600;opacity:1}
 /* streaming polish */
-#progress{color:#8B93A0;font-size:.85rem;margin:8px 0;min-height:1.2em}
-.cursor::after{content:"\\258c";color:#1EB182;animation:blink 1s steps(1) infinite}
+#progress{color:#5D6875;font-size:.85rem;margin:8px 0;min-height:1.2em}
+.cursor::after{content:"\\258c";color:#0E9A73;animation:blink 1s steps(1) infinite}
 @keyframes blink{50%{opacity:0}}
 /* two-pane review: document left, sticky score+review rail right, scan sweep */
-.stage{display:grid;grid-template-columns:1fr 300px;gap:18px;align-items:start;margin-top:10px}
-.doc{position:relative;overflow:hidden;border:1px solid #222A34;border-radius:10px;background:#0f141b}
+.stage{display:grid;grid-template-columns:1fr 320px;gap:18px;align-items:start;margin-top:10px}
+.doc{position:relative;overflow:hidden;border:1px solid #E3E7EC;border-radius:10px;background:#FFFFFF;
+ box-shadow:0 1px 3px rgba(27,36,48,.06)}
 .doc.scanning::after{content:"";position:absolute;left:0;right:0;top:-100px;height:100px;pointer-events:none;
- background:linear-gradient(180deg,transparent,rgba(30,177,130,.18),transparent);animation:scan 1.9s linear infinite}
+ background:linear-gradient(180deg,transparent,rgba(14,154,115,.14),transparent);animation:scan 1.9s linear infinite}
 @keyframes scan{from{top:-100px}to{top:100%}}
-.drow{padding:13px 15px;border-bottom:1px solid #171d25;border-left:3px solid transparent}
-.drow:last-child{border-bottom:none} .drow.flagged{border-left-color:#c8565f}
-.dtext{line-height:1.85;font-size:.97rem;color:#e2e7ec}
-.dnote{margin-top:7px;font-size:.82rem;color:#9aa4b0;display:flex;gap:8px;align-items:baseline}
-.dnote.flagged{color:#e3b7b7} .dnote .p{font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+.drow{padding:13px 15px;border-bottom:1px solid #EEF1F4;border-left:3px solid transparent}
+.drow:last-child{border-bottom:none} .drow.flagged{border-left-color:#C0394B}
+.dtitle{font-weight:600;font-size:.85rem;color:#5D6875;margin:0 0 5px}
+.dtext{line-height:1.85;font-size:1.02rem;color:#232D3A;font-family:Charter,Georgia,'Times New Roman',serif}
+.dnote{margin-top:7px;font-size:.82rem;color:#68737F;display:flex;gap:8px;align-items:baseline}
+.dnote.flagged{color:#A32536} .dnote .p{font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
 .rail{position:sticky;top:14px;align-self:start} #ov{margin:0 0 8px}
-.rail .score{font-size:2rem;font-weight:800;font-variant-numeric:tabular-nums}
-.review{background:#101a16;border:1px solid #1d3a2e;border-radius:10px;padding:14px 16px;margin:6px 0;
- white-space:pre-wrap;line-height:1.6;font-size:.92rem}
+.dial{position:relative;width:110px;height:110px;margin:0 0 6px}
+.dial svg{transform:rotate(-90deg)}
+.dial .n{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+ font-size:1.55rem;font-weight:800}
+.rail h3{margin:14px 0 6px;font-size:.95rem}
+.toc{margin:10px 0 0;font-size:.82rem}
+.toc a{display:flex;justify-content:space-between;gap:8px;color:#41505E;padding:3px 6px;
+ border-radius:6px;border-left:2px solid transparent}
+.toc a:hover{background:#EDF0F3;text-decoration:none} .toc a.f{border-left-color:#C0394B;color:#A32536}
+.toc .p{font-variant-numeric:tabular-nums;white-space:nowrap}
 @media(max-width:760px){.stage{grid-template-columns:1fr}.rail{position:static}}
 """
+
+FAVICON = ("<link rel=icon href=\"data:image/svg+xml,"
+           "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
+           "<rect width='100' height='100' rx='18' fill='%23ffe14d'/>"
+           "<text x='50' y='72' font-size='62' text-anchor='middle'>&#128269;</text></svg>\">")
 
 LEGEND = ("<div class=legend>Highlights: <mark class='hl-transition l3'>however</mark>"
           " transition <mark class='hl-booster l3'>clearly</mark> booster "
@@ -133,25 +167,54 @@ def _e(x) -> str:
     return html.escape(str(x))
 
 
-def _bar(p: float) -> str:
-    w = max(2, round(p * 120))
-    hue = 120 - round(p * 120)
-    return f"<span class=bar style='width:{w}px;background:hsl({hue},55%,45%)'></span>"
+def _bar(p: float, hot: bool | None = None) -> str:
+    hot = p >= A.FLAG_THRESHOLD if hot is None else hot
+    return (f"<span class='bar{' hot' if hot else ''}'>"
+            f"<i style='width:{max(2, round(p * 100))}%'></i></span>")
 
 
-def _page(title: str, body: str, script: str = "") -> str:
+_DIAL_C = 2 * math.pi * 50
+
+
+def _dial(p: float, hot: bool) -> str:
+    col = "#C0394B" if hot else "#0E9A73"
+    return (f"<div class=dial><svg width=110 height=110 viewBox='0 0 110 110'>"
+            f"<circle cx=55 cy=55 r=50 fill=none stroke='#E3E7EC' stroke-width=10 />"
+            f"<circle cx=55 cy=55 r=50 fill=none stroke='{col}' stroke-width=10 "
+            f"stroke-linecap=round stroke-dasharray={_DIAL_C:.1f} "
+            f"stroke-dashoffset={_DIAL_C * (1 - min(1.0, p)):.1f} /></svg>"
+            f"<div class=n>{p:.2f}</div></div>")
+
+
+def _page(title: str, body: str, script: str = "", desc: str = "") -> str:
+    og = (f"<meta property=og:title content='{_e(title)}'>"
+          f"<meta property=og:description content='{_e(desc)}'>") if desc else ""
     return (f"<!doctype html><html lang=en><head><meta charset=utf-8>"
             f"<meta name=viewport content='width=device-width,initial-scale=1'>"
-            f"<title>{_e(title)}</title><style>{CSS}</style></head>"
-            f"<body><div class=wrap>{body}</div>{script}</body></html>")
+            f"<title>{_e(title)}</title>{FAVICON}{og}<style>{CSS}</style></head>"
+            f"<body><div class=wrap>{body}</div>{SPOT_SCRIPT}{script}</body></html>")
+
+
+def _pill(tell: str, tail: str, doc: str = "") -> str:
+    """One tell pill. Locatable tells are clickable (spotlight in the document);
+    every pill gets its plain-language description as a tooltip."""
+    cat = A._HL_FEATURE.get(tell)
+    tip = doc + (". Click to spotlight it in the text." if cat and doc else "")
+    attrs = (f" title='{_e(tip)}'" if tip else "") + (f" data-spot={cat}" if cat else "")
+    return f"<span class=pill{attrs}>{_e(tell)} {tail}</span>"
 
 
 def _tell_pills(tells) -> str:
     return "".join(
-        f"<span class=pill>{_e(t['tell'])} "
-        f"<span class={'contrib' if t['contribution']>0 else 'neg'}>{t['contribution']:+.2f}</span> "
-        f"<span class=muted>({t['value']})</span></span>"
+        _pill(t["tell"],
+              f"<span class={'contrib' if t['contribution'] > 0 else 'neg'}>{t['contribution']:+.2f}</span> "
+              f"<span class=muted>({t['value']})</span>", t.get("doc", ""))
         for t in tells)
+
+
+def _drive_pills(tells) -> str:
+    return "".join(_pill(t["tell"], f"<b class=contrib>+{t['drive']:.2f}</b>", t.get("doc", ""))
+                   for t in tells)
 
 
 # plain phrase per tell for a margin comment (only the human-legible ones)
@@ -183,24 +246,49 @@ def _comment(it: dict) -> str:
     return f"Reads human ({it['proba']:.2f})."
 
 
-def _section_html(s: dict) -> str:
-    cls = "sec flagged" if s["flagged"] else "sec"
-    badge = ("<span class='badge flag'>FLAGGED</span>" if s["flagged"]
+# --- the one review layout: document pane + score rail --------------------
+def _doc_row(i: int, it: dict, body_html: str) -> str:
+    flagged = it["flagged"]
+    title = it.get("title") or ""
+    dtitle = f"<div class=dtitle>{_e(title)}</div>" if title and not title.startswith("Paragraph") else ""
+    return (f"<div class='drow{' flagged' if flagged else ''}' id=s{i}>{dtitle}"
+            f"<div class=dtext>{body_html}</div>"
+            f"<div class='dnote{' flagged' if flagged else ''}'>"
+            f"<span class=p>{_bar(it['proba'], flagged)} {it['proba']:.2f}</span>"
+            f"<span>{it.get('comment') or _comment(it)}</span></div></div>")
+
+
+def _toc(sections) -> str:
+    links = "".join(
+        f"<a href='#s{i}' class='{'f' if s['flagged'] else ''}'>"
+        f"<span>{_e((s.get('title') or f'Passage {i + 1}')[:34])}</span>"
+        f"<span class=p>{s['proba']:.2f}</span></a>"
+        for i, s in enumerate(sections))
+    return f"<h3>Sections</h3><div class=toc>{links}</div>" if links else ""
+
+
+def _stage(rows_html: str, rail_html: str) -> str:
+    return (f"{LEGEND}<div class=stage><div class=doc>{rows_html}</div>"
+            f"<div class=rail>{rail_html}</div></div>")
+
+
+def _render_dossier(doc: dict) -> str:
+    """The two-pane review for a paper dossier (stored or freshly audited)."""
+    rows = "".join(
+        _doc_row(i, s, highlight_html(s["excerpt"], s.get("hl_levels")) + "...")
+        for i, s in enumerate(doc["sections"]))
+    hot = doc["n_flagged"] > 0
+    badge = ("<span class='badge flag'>FLAGGED</span>" if hot
              else "<span class='badge ok'>clear</span>")
-    pills = _tell_pills(s.get("top_tells", []))
-    return (f"<div class='{cls}'><h3>{_e(s['title'])} {badge}</h3>"
-            f"<div class=muted>{_bar(s['proba'])} P(LLM) {s['proba']:.3f} &middot; {s['n_words']} words</div>"
-            f"<div style='margin-top:8px'>{pills or '<span class=muted>no tell pushed toward LLM</span>'}</div>"
-            f"<div class=exc>{highlight_html(s['excerpt'])}...</div></div>")
-
-
-def _render_sections(doc: dict) -> str:
-    paper_tells = "".join(
-        f"<span class=pill>{_e(t['tell'])} <b class=contrib>+{t['drive']:.2f}</b></span>"
-        for t in doc.get("top_tells", []))
-    secs = "".join(_section_html(s) for s in doc["sections"])
-    return (f"<h2>Tells driving this paper</h2><div>{paper_tells or '<span class=muted>none</span>'}</div>"
-            f"{LEGEND}<h2>Per-section evidence</h2>{secs}")
+    pills = _drive_pills(doc.get("top_tells", []))
+    rail = (f"<div id=ov>{_dial(doc['max_proba'], hot)}"
+            f"<div class=muted>max P(LLM) &middot; mean {doc['mean_proba']:.2f}</div>"
+            f"<div style='margin-top:5px'>{badge} <span class=muted>"
+            f"{doc['n_flagged']} of {doc['n_sections']} sections</span></div></div>"
+            f"<h3>Tells driving this paper</h3>"
+            f"<div>{pills or '<span class=muted>none</span>'}</div>"
+            f"{_toc(doc['sections'])}")
+    return _stage(rows, rail)
 
 
 def _warming() -> str:
@@ -231,7 +319,7 @@ async def refresh_loop():
 def _warmup() -> None:
     import hopsworks
     proj = hopsworks.login()
-    mdir = proj.get_model_registry().get_model("tell_classifier", version=1).download()
+    mdir = proj.get_model_registry().get_model("tell_classifier", version=A.MODEL_VERSION).download()
     ENGINE["auditor"] = A.load_auditor(mdir)
     try:
         os.environ["ANTHROPIC_API_KEY"] = hopsworks.get_secrets_api().get_secret("ANTHROPIC_API_KEY").value
@@ -287,6 +375,20 @@ class StripForwardedPrefix:
 application = StripForwardedPrefix(app)
 
 
+# --- spotlight: click a locatable tell pill to isolate its marks ----------
+SPOT_SCRIPT = """<script>
+document.addEventListener('click',function(e){
+ var p=e.target.closest?e.target.closest('.pill[data-spot]'):null; if(!p)return;
+ var cat=p.getAttribute('data-spot'), docs=document.querySelectorAll('.doc');
+ if(!docs.length)return;
+ var on=docs[0].getAttribute('data-spot')!==cat;
+ docs.forEach(function(d){on?d.setAttribute('data-spot',cat):d.removeAttribute('data-spot')});
+ document.querySelectorAll('.pill.on').forEach(function(x){x.classList.remove('on')});
+ if(on)p.classList.add('on');
+});
+</script>"""
+
+
 # --- the streaming client (inline, progressive enhancement) --------------
 def _script(base: str) -> str:
     return "<script>" + STREAM_JS.replace("__BASE__", base) + "</script>"
@@ -296,7 +398,13 @@ STREAM_JS = r"""
 const BASE="__BASE__";
 const el=t=>document.createElement(t);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-const barHTML=p=>`<span class="bar" style="width:${Math.max(2,Math.round(p*120))}px;background:hsl(${120-Math.round(p*120)},55%,45%)"></span>`;
+const barHTML=(p,hot)=>`<span class="bar${hot?' hot':''}"><i style="width:${Math.max(2,Math.round(p*100))}%"></i></span>`;
+const C=2*Math.PI*50;
+const dialHTML=(p,hot)=>`<div class=dial><svg width=110 height=110 viewBox="0 0 110 110">`+
+ `<circle cx=55 cy=55 r=50 fill=none stroke="#E3E7EC" stroke-width=10 />`+
+ `<circle cx=55 cy=55 r=50 fill=none stroke="${hot?'#C0394B':'#0E9A73'}" stroke-width=10 `+
+ `stroke-linecap=round stroke-dasharray=${C.toFixed(1)} stroke-dashoffset=${(C*(1-Math.min(1,p))).toFixed(1)} />`+
+ `</svg><div class=n>${p.toFixed(2)}</div></div>`;
 const af=document.getElementById('af'), q=document.getElementById('q'), go=document.getElementById('go');
 if(af && window.fetch && window.ReadableStream){
  af.addEventListener('submit', async e=>{
@@ -311,6 +419,7 @@ if(af && window.fetch && window.ReadableStream){
   const rail=el('div'); rail.className='rail'; stage.appendChild(rail);
   const ov=el('div'); ov.id='ov'; rail.appendChild(ov);
   const status=el('div'); status.id='progress'; status.textContent='Reading...'; rail.appendChild(status);
+  const toc=el('div'); toc.className='toc'; rail.appendChild(toc);
 
   // network state, filled by the reader; the renderer below paces the visuals so
   // the "flow" looks right whether the proxy trickles the stream or buffers it.
@@ -338,16 +447,22 @@ if(af && window.fetch && window.ReadableStream){
    streaming=false; fbDone=true;
   })();
 
+  let n=0;
   function addRow(it){
-   const row=el('div'); row.className='drow'+(it.flagged?' flagged':'');
+   const row=el('div'); row.className='drow'+(it.flagged?' flagged':''); row.id='s'+n;
+   if(it.title && !it.title.startsWith('Paragraph')){
+    const tt=el('div'); tt.className='dtitle'; tt.textContent=it.title; row.appendChild(tt);
+    const a=el('a'); a.href='#s'+n; a.className=it.flagged?'f':'';
+    a.innerHTML=`<span>${it.title.slice(0,34)}</span><span class=p>${it.proba.toFixed(2)}</span>`;
+    toc.appendChild(a);
+   }
    const tx=el('div'); tx.className='dtext'; tx.innerHTML=it.html;
    const nt=el('div'); nt.className='dnote'+(it.flagged?' flagged':'');
-   nt.innerHTML=`<span class=p>${barHTML(it.proba)} ${it.proba.toFixed(2)}</span><span>${it.comment}</span>`;
+   nt.innerHTML=`<span class=p>${barHTML(it.proba,it.flagged)} ${it.proba.toFixed(2)}</span><span>${it.comment}</span>`;
    row.appendChild(tx); row.appendChild(nt); doc.appendChild(row);
   }
 
   // paced renderer: one passage every ~150ms while the scan sweeps
-  let n=0;
   while(streaming || queue.length){
    if(redirectUrl){location.href=redirectUrl; return;}
    if(queue.length){ addRow(queue.shift()); n++; status.textContent=`Checked ${n} passage${n>1?'s':''}...`; await sleep(150); }
@@ -358,7 +473,7 @@ if(af && window.fetch && window.ReadableStream){
 
   doc.classList.remove('scanning'); status.textContent='';
   if(overallMsg){ const m=overallMsg;
-   ov.innerHTML=`<span class="score">${m.proba.toFixed(2)}</span>`+
+   ov.innerHTML=dialHTML(m.proba,m.flagged)+
     `<div class=muted>P(matches LLM style)</div>`+
     `<div style="margin-top:5px"><span class="badge ${m.flagged?'flag':(m.short?'warn':'ok')}">`+
     `${m.flagged?'FLAGGED':(m.short?'too short to trust':'clear')}</span></div>`; }
@@ -366,7 +481,7 @@ if(af && window.fetch && window.ReadableStream){
    p.textContent=noteMsg; rail.appendChild(p); }
 
   if(fbStarted){
-   const h=el('h3'); h.textContent='Review'; h.style.margin='14px 0 6px'; rail.appendChild(h);
+   const h=el('h3'); h.textContent='Review'; rail.appendChild(h);
    const box=el('div'); box.className='review cursor'; rail.appendChild(box);
    // typewriter the (possibly already fully received) review, client-side paced
    let i=0;
@@ -388,30 +503,66 @@ def health():
     return {"ok": True, "dossiers": len(DOSSIERS["rows"]), "engine": ENGINE["ready"]}
 
 
+_SORTS = {"flagged": lambda r: (r.get("flagged_share", 0), r.get("max_proba", 0)),
+          "max": lambda r: r.get("max_proba", 0),
+          "mean": lambda r: r.get("mean_proba", 0)}
+
+
+def _qs(cat: str, sort: str) -> str:
+    parts = [p for p in (f"cat={cat}" if cat else "", f"sort={sort}" if sort != "flagged" else "") if p]
+    return "?" + "&".join(parts) if parts else ""
+
+
 @app.get("/", response_class=HTMLResponse)
-def index(request: Request):
+def index(request: Request, cat: str = "", sort: str = "flagged"):
     base = _base(request)
+    sort = sort if sort in _SORTS else "flagged"
     rows = DOSSIERS["rows"]
     note = f"<div class='band'><b>Note:</b> {_e(ENGINE['note'])}</div>" if ENGINE["note"] else ""
+
+    tiles, cats_html = "", ""
+    shown = rows
+    if rows:
+        n_flagged_papers = sum(1 for r in rows if r.get("n_flagged", 0) > 0)
+        cats = sorted({r.get("category", "") for r in rows if r.get("category")})
+        tiles = ("<div class=tiles>"
+                 f"<div class=tile><div class=v>{len(rows)}</div><div class=l>papers audited</div></div>"
+                 f"<div class=tile><div class=v>{sum(r.get('n_sections', 0) for r in rows)}</div>"
+                 "<div class=l>sections scored</div></div>"
+                 f"<div class=tile><div class=v>{n_flagged_papers}</div>"
+                 "<div class=l>papers with a flagged section</div></div>"
+                 f"<div class=tile><div class=v>{len(cats)}</div><div class=l>arXiv categories</div></div>"
+                 "</div>")
+        shown = [r for r in rows if not cat or r.get("category") == cat]
+        shown.sort(key=_SORTS[sort], reverse=True)
+        cat_links = f"<a href='{base}/{_qs('', sort)}' class='{'on' if not cat else ''}'>all</a>" + "".join(
+            f"<a href='{base}/{_qs(c, sort)}' class='{'on' if c == cat else ''}'>{_e(c)}</a>" for c in cats)
+        cats_html = f"<div class=cats>{cat_links}</div>"
+
+    def th(label: str, key: str) -> str:
+        return (f"<th class=num><a href='{base}/{_qs(cat, key)}' "
+                f"class='{'on' if sort == key else ''}'>{label}</a></th>")
+
     trs = "".join(
         f"<tr><td><a href='{base}/paper/{_e(r['paper_id'])}'>{_e((r.get('title') or r['paper_id'])[:80])}</a>"
-        f"<div class=muted style='font-size:.8rem'>{_e(r['paper_id'])} &middot; {_e(r.get('category',''))}</div></td>"
-        f"<td class=num>{r.get('n_flagged',0)}/{r.get('n_sections',0)}</td>"
-        f"<td class=num>{_bar(r.get('max_proba',0))} {r.get('max_proba',0):.2f}</td>"
-        f"<td class=num>{r.get('mean_proba',0):.2f}</td></tr>" for r in rows)
-    table = ("<table><thead><tr><th>Paper</th><th class=num>Flagged</th>"
-             "<th class=num>Max P(LLM)</th><th class=num>Mean</th></tr></thead><tbody>"
-             + trs + "</tbody></table>") if rows else "<p class=muted>No dossiers yet.</p>"
+        f"<div class=muted style='font-size:.8rem'>{_e(r['paper_id'])} &middot; {_e(r.get('category', ''))}</div></td>"
+        f"<td class=num>{r.get('n_flagged', 0)}/{r.get('n_sections', 0)}</td>"
+        f"<td class=num>{_bar(r.get('max_proba', 0))} {r.get('max_proba', 0):.2f}</td>"
+        f"<td class=num>{r.get('mean_proba', 0):.2f}</td></tr>" for r in shown)
+    table = (f"<table><thead><tr><th>Paper</th>{th('Flagged', 'flagged')}"
+             f"{th('Max P(LLM)', 'max')}{th('Mean', 'mean')}</tr></thead><tbody>"
+             + trs + "</tbody></table>") if shown else "<p class=muted>No dossiers yet.</p>"
     body = (
         "<h1>LLM Tell Auditor</h1>"
         "<p class=sub>Paste anything to audit its writing style, or browse recent "
-        f"arXiv preprints already audited.</p>{note}"
+        f"arXiv preprints already audited.</p>{note}{tiles}"
         f"{FORM.format(base=base)}{LEGEND}{BANNER}"
         f"<div id=result></div>"
-        f"<h2>Audited preprints ({len(rows)})</h2>{table}"
-        "<p class=foot>Flagged = P(LLM) &ge; 0.5 from tell_classifier v1, a calibrated "
-        "logistic over 16 stylometric tells, held out by paper. Matches known tells, nothing more.</p>")
-    return HTMLResponse(_page("LLM Tell Auditor", body, _script(base)))
+        f"<h2>Audited preprints ({len(shown)})</h2>{cats_html}{table}"
+        "<p class=foot>Flagged = P(LLM) &ge; 0.5 from the tell_classifier, a calibrated "
+        "model over 16 stylometric tells, held out by paper. Matches known tells, nothing more.</p>")
+    return HTMLResponse(_page("LLM Tell Auditor", body, _script(base),
+                              desc="Audit academic prose for LLM writing tells. Signal, not verdict."))
 
 
 def _ndjson(obj) -> str:
@@ -486,7 +637,7 @@ def audit_stream(request: Request, q: str = Form("")):
 
 @app.post("/audit", response_class=HTMLResponse)
 def audit_submit(request: Request, q: str = Form("")):
-    """No-JS fallback: one server-rendered result page."""
+    """No-JS fallback: one server-rendered result page, same two-pane review."""
     base = _base(request)
     q = (q or "").strip()
     if not ENGINE["ready"]:
@@ -507,19 +658,22 @@ def audit_submit(request: Request, q: str = Form("")):
         body = (f"<p><a href='{base}/'>&larr; audit another</a></p><h1>{_e(dossier['title'])}</h1>"
                 f"<p class=sub>{_e(aid)} &middot; live audit &middot; "
                 f"<a href='https://arxiv.org/abs/{_e(aid)}'>arXiv</a></p>{BANNER}"
-                f"<p>{dossier['n_flagged']} of {dossier['n_sections']} sections flagged "
-                f"&middot; mean P(LLM) {dossier['mean_proba']:.3f} &middot; max {dossier['max_proba']:.3f}</p>"
-                f"{_render_sections(dossier)}")
-        return HTMLResponse(_page(dossier["title"], body))
+                f"{_render_dossier(dossier)}")
+        return HTMLResponse(_page(dossier["title"], body,
+                                  desc=f"{dossier['n_flagged']} of {dossier['n_sections']} sections flagged."))
 
     text = q[:MAX_CHARS]
+    paras = A.split_paragraphs(text)
+    items = [A.score_item(f"Paragraph {i + 1}", p, ENGINE["auditor"]) for i, p in enumerate(paras)]
+    rows = "".join(_doc_row(i, it, highlight_html(p, it.get("hl_levels")))
+                   for i, (it, p) in enumerate(zip(items, paras)))
     res = A.audit_text(text, ENGINE["auditor"])
     badge = ("<span class='badge flag'>FLAGGED</span>" if res["flagged"]
              else "<span class='badge ok'>clear</span>")
-    short = "<span class='badge warn'>too short to trust</span>" if res["short"] else ""
+    short = " <span class='badge warn'>too short to trust</span>" if res["short"] else ""
     if ENGINE["client"]:
         try:
-            feedback = f"<div class=feedback>{_e(E.explain(text, res, ENGINE['client']))}</div>"
+            feedback = f"<h3>Review</h3><div class=review>{_e(E.explain(text, res, ENGINE['client']))}</div>"
         except Exception as ex:
             feedback = f"<p class=muted>Feedback unavailable: {_e(str(ex)[:140])}</p>"
     else:
@@ -527,19 +681,18 @@ def audit_submit(request: Request, q: str = Form("")):
     fired = _tell_pills(res["top_tells"])
     human = _tell_pills(sorted((t for t in res["all_tells"] if t["contribution"] < 0),
                                key=lambda t: t["contribution"])[:4])
+    rail = (f"<div id=ov>{_dial(res['proba'], res['flagged'])}"
+            f"<div class=muted>P(matches LLM style) &middot; {res['n_words']} words</div>"
+            f"<div style='margin-top:5px'>{badge}{short}</div></div>"
+            f"{feedback}"
+            f"<h3>Toward LLM style</h3><div>{fired or '<span class=muted>none</span>'}</div>"
+            f"<h3>Toward human style</h3><div>{human or '<span class=muted>none</span>'}</div>")
     body = (
         f"<p><a href='{base}/'>&larr; audit another</a></p><h1>Style audit</h1>"
-        f"<p><span class=score>{res['proba']:.2f}</span> <span class=muted>P(matches LLM style)</span> "
-        f"{badge} {short} <span class=muted>&middot; {res['n_words']} words</span></p>"
-        f"<div>{_bar(res['proba'])}</div>{BANNER}"
-        f"<h2>What this means</h2>{feedback}"
-        f"<h2>Tells pushing toward LLM style</h2><div>{fired or '<span class=muted>none</span>'}</div>"
-        f"<h2>Tells pushing toward human style</h2><div>{human or '<span class=muted>none</span>'}</div>"
-        f"{LEGEND}<h2>Your text</h2><div class=exc>{highlight_html(res['excerpt'])}"
-        f"{'...' if len(text) > 400 else ''}</div>"
+        f"{BANNER}{_stage(rows, rail)}"
         "<p class=foot>Contribution is each tell's push on the log-odds "
         "(+ toward LLM style, - toward human style); the value is the measured feature.</p>")
-    return HTMLResponse(_page("Style audit", body))
+    return HTMLResponse(_page("Style audit", body, desc="Stylometric audit of pasted prose."))
 
 
 @app.get("/paper/{paper_id}", response_class=HTMLResponse)
@@ -552,15 +705,17 @@ def paper(request: Request, paper_id: str):
         return HTMLResponse(_page("Not found",
                             f"<h1>Not found</h1><p><a href='{base}/'>&larr; all papers</a></p>"
                             f"<p class=muted>No dossier for {_e(paper_id)}.</p>"), status_code=404)
+    # sections_json holds sections + top_tells; the paper-level stats are row columns
     doc = json.loads(r["sections_json"])
+    for k in ("n_flagged", "n_sections", "mean_proba", "max_proba"):
+        doc.setdefault(k, r.get(k, 0))
     body = (
         f"<p><a href='{base}/'>&larr; all papers</a></p><h1>{_e(r.get('title') or paper_id)}</h1>"
-        f"<p class=sub>{_e(paper_id)} &middot; {_e(r.get('category',''))} &middot; "
+        f"<p class=sub>{_e(paper_id)} &middot; {_e(r.get('category', ''))} &middot; "
         f"<a href='https://arxiv.org/abs/{_e(paper_id)}'>arXiv</a></p>{BANNER}"
-        f"<p>{r.get('n_flagged',0)} of {r.get('n_sections',0)} sections flagged "
-        f"&middot; mean P(LLM) {r.get('mean_proba',0):.3f} &middot; max {r.get('max_proba',0):.3f}</p>"
-        f"{_render_sections(doc)}")
-    return HTMLResponse(_page(r.get("title") or paper_id, body))
+        f"{_render_dossier(doc)}")
+    return HTMLResponse(_page(r.get("title") or paper_id, body,
+                              desc=f"{r.get('n_flagged', 0)} of {r.get('n_sections', 0)} sections flagged."))
 
 
 if __name__ == "__main__":
