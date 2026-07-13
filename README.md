@@ -95,7 +95,25 @@ The rewrite-pair firewall is the core F design. A reader agent extracts a
 prose-free content skeleton (every claim, number, entity, no wording); a naive
 writer that never sees the original writes the twin from the skeleton alone.
 Content is held, only style is swapped, so the classifier cannot cheat on topic.
-The writer is a within-provider panel assigned deterministically by `pair_id`.
+
+```mermaid
+flowchart LR
+    hs([human section]):::ext --> rd[reader · sonnet-5]
+    subgraph FW[firewall: only content crosses, no wording]
+        rd --> sk[content skeleton<br/>claims · entities · numbers · structure<br/>facts only, zero prose]
+    end
+    sk --> wr[writer panel<br/>opus / sonnet / haiku<br/>picked by sha256 of pair_id]
+    wr --> tw([LLM twin: same content, its own voice])
+    tw --> fg[(paper_twins)]:::hops
+    hs --> fg
+    classDef hops fill:#10b98122,stroke:#34d399,color:#e5e7eb;
+    classDef ext fill:none,stroke:#6b7280,color:#9ca3af,stroke-dasharray:4 3;
+```
+
+The writer is a within-provider panel (three model sizes leave three different
+fingerprints, so the classifier learns LLM-ness, not one model's tics). Sampling
+params are fixed on these models, so panel diversity comes from model identity,
+assigned deterministically by `pair_id`: reproducible, no RNG.
 
 The file-by-file map:
 
