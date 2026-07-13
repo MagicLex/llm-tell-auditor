@@ -149,6 +149,12 @@ hops job run audit-dossiers --args "--per-category 8"   # I  paper_dossiers
 python app/deploy_app.py                     # the review app
 ```
 
+The two expensive datasets are snapshotted in the repo so a rebuild can skip
+F1 and F2 (the twin generation costs ~0.02 USD per pair in Anthropic calls):
+`assets/arxiv_papers_raw.parquet` (785 human sections) and
+`assets/paper_twins.parquet` (738 rewrite twins). Insert them into their
+feature groups and start at `build-tells`.
+
 ## The demo
 
 ![tellauditor review](assets/app.png)
