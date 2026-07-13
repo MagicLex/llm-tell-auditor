@@ -151,6 +151,8 @@ python app/deploy_app.py                     # the review app
 
 ## The demo
 
+![tellauditor review](assets/app.png)
+
 `tellauditor`, a two-pane review. Paste any prose or an arXiv id: the document
 renders on the left with stabilo highlights on the token-level tells (marker
 brightness scales with how much each moved the score, a scan-line sweeps while it
