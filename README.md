@@ -39,6 +39,10 @@ and inflate the number.
 | brier score | 0.054 |
 | blind baseline | 0.50 |
 
+![ROC](assets/roc.png)
+![calibration](assets/calibration.png)
+![per-tell importance](assets/tell_importance.png)
+
 Top tells by standardized weight: LLM-style prose runs longer and denser
 sentences, more polysyllabic words, lower lexical diversity, and fewer
 parenthetical asides. A coherent stylometric signature, not a wordlist. Naive
@@ -111,16 +115,6 @@ app/server.py            server-rendered review app: live scoring + streamed fee
 app/deploy_app.py        deploy the app
 ```
 
-## The app
-
-`tellauditor`, a server-rendered review view. Paste any text or an arXiv id and it
-scores each passage live with the model, highlights the token-level tells in the
-text (marker brightness scales with how much each moved the score), writes a
-margin note per passage, and streams a plain-language review. The score comes from
-the ML model; the written review only explains it. Content is in the initial HTML
-payload, so it works without JavaScript; the streaming and animation are
-progressive enhancement.
-
 ## Reproduce
 
 Clone into a Hopsworks project on the `/hopsfs/...` FUSE mount. Paths self-derive.
@@ -137,5 +131,12 @@ hops job run audit-dossiers --args "--per-category 8"   # I  paper_dossiers
 python app/deploy_app.py                     # the review app
 ```
 
-Built as system #010 in [awesome-ml-systems](https://github.com/MagicLex/awesome-ml-systems),
-one small honest ML system per day on Hopsworks.
+## The demo
+
+`tellauditor`, a two-pane review. Paste any prose or an arXiv id: the document
+renders on the left with stabilo highlights on the token-level tells (marker
+brightness scales with how much each moved the score, a scan-line sweeps while it
+checks), and a sticky score rail on the right streams a plain-language review.
+The score comes from the ML model; the written review only explains it, signal
+not verdict. Content is in the initial HTML payload, so it works without
+JavaScript; the streaming and animation are progressive enhancement.
