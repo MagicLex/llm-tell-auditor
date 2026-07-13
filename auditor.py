@@ -36,6 +36,8 @@ from tell_features import FEATURE_DOC, features
 MIN_WORDS = 40
 FLAG_THRESHOLD = 0.5
 FAMILY = "stylometric_polish"
+# the one pinned registry version; every consumer (job, app, explain) imports this
+MODEL_VERSION = 2
 
 # a bare arXiv id (2607.08754 / 2607.08754v1) or an arxiv.org/abs/... URL
 _ARXIV_ID = re.compile(r"\b(\d{4}\.\d{4,5}(?:v\d+)?)\b")
@@ -51,12 +53,14 @@ def extract_arxiv_id(s: str) -> str | None:
 
 
 def load_auditor(model_dir: str) -> dict:
-    """Load the calibrated classifier plus an averaged linear model for explanation.
+    """Load the calibrated members plus an averaged linear model for explanation.
 
-    The calibrated model is an ensemble of `n_folds` scaler+logistic pipelines.
-    We keep the whole ensemble for the honest calibrated probability, and average
-    the folds' scaler stats and coefficients into one linear model to attribute a
-    section's score to individual tells.
+    `model.pkl` is the tell member: an ensemble of `n_folds` scaler+logistic
+    pipelines. We keep the whole ensemble for the honest calibrated probability,
+    and average the folds' scaler stats and coefficients into one linear model to
+    attribute a section's score to individual tells. `ngram.pkl` + `blend.json`
+    (v2+) add the char-ngram member; the served score is the blend, the tell
+    attribution stays the evidence.
     """
     clf = joblib.load(os.path.join(model_dir, "model.pkl"))
     feature_names = _read_json(os.path.join(model_dir, "feature_names.json"))
@@ -70,8 +74,15 @@ def load_auditor(model_dir: str) -> dict:
         coefs.append(lr.coef_[0])
         intercepts.append(lr.intercept_[0])
 
+    ngram_path = os.path.join(model_dir, "ngram.pkl")
+    blend_path = os.path.join(model_dir, "blend.json")
+    ngram = joblib.load(ngram_path) if os.path.exists(ngram_path) else None
+    blend_w = _read_json(blend_path)["w"] if ngram and os.path.exists(blend_path) else 0.0
+
     return {
         "clf": clf,
+        "ngram": ngram,
+        "blend_w": blend_w,
         "feature_names": feature_names,
         "mean": np.mean(means, axis=0),
         "scale": np.mean(scales, axis=0),
@@ -94,15 +105,22 @@ def _row(feat: dict, feature_names: list[str]) -> pd.DataFrame:
 def score_section(text: str, auditor: dict) -> dict:
     """Score one section: calibrated P(LLM) plus per-tell contributions.
 
-    Contribution of tell i to the log-odds is coef_i * z_i, where z_i is the
-    section's value standardized by the training mean/scale. Positive pushes
-    toward LLM, negative toward human. These sum (with the intercept) to the
-    linear log-odds; the reported probability is the calibrated one.
+    The probability is the blend of the tell member and (when present) the
+    char-ngram member: (1-w)*tells + w*ngram, both calibrated.
+
+    Contribution of tell i to the tell member's log-odds is coef_i * z_i, where
+    z_i is the section's value standardized by the training mean/scale. Positive
+    pushes toward LLM, negative toward human. The contributions explain the tell
+    member only; the ngram member has no honest per-tell story.
     """
     feat = features(text)
     names = auditor["feature_names"]
     x = _row(feat, names)
     proba = float(auditor["clf"].predict_proba(x)[0, 1])
+    if auditor.get("ngram") is not None:
+        p_ngram = float(auditor["ngram"].predict_proba([text])[0, 1])
+        w = auditor["blend_w"]
+        proba = (1 - w) * proba + w * p_ngram
 
     xv = x.iloc[0].to_numpy()
     z = (xv - auditor["mean"]) / auditor["scale"]
@@ -212,7 +230,7 @@ def audit_paper(arxiv_id: str, auditor: dict, title: str | None = None) -> dict 
         "paper_id": arxiv_id,
         "title": title or arxiv_id,
         "family": FAMILY,
-        "model_version": 1,
+        "model_version": MODEL_VERSION,
         "n_sections": len(sections),
         "n_flagged": len(flagged),
         "flagged_share": round(len(flagged) / len(sections), 4),
@@ -254,7 +272,7 @@ if __name__ == "__main__":
     mdir = os.environ.get("MODEL_DIR")
     if not mdir:
         import hopsworks
-        m = hopsworks.login().get_model_registry().get_model("tell_classifier", version=1)
+        m = hopsworks.login().get_model_registry().get_model("tell_classifier", version=MODEL_VERSION)
         mdir = m.download()
     aud = load_auditor(mdir)
     ident = sys.argv[1] if len(sys.argv) > 1 else "2607.08754"

@@ -1,5 +1,7 @@
 # LLM Tell Auditor
 
+![LLM Tell Auditor](assets/banner.svg)
+
 [![awesome-ml-systems](https://img.shields.io/badge/awesome--ml--systems-%23010-34d399?labelColor=0b0e11&style=flat)](https://github.com/MagicLex/awesome-ml-systems)
 [![Hopsworks](https://img.shields.io/badge/built_on-Hopsworks-1CB182?labelColor=0b0e11&style=flat)](https://www.hopsworks.ai/)
 
@@ -8,7 +10,7 @@ Does a passage of academic prose read like it was written by an LLM, from its
 writing matches LLM-authored rewrites of real paper sections, and shows the
 evidence: which stylometric tells fired, where, and how much each moved the
 score. Held out by paper, it separates human from LLM-authored prose at **ROC-AUC
-0.866**.
+0.986**.
 
 It reports a **signal, not a verdict**. A high score means the prose resembles a
 known LLM writing style, not that the work is AI-generated or that it is bad. A
@@ -16,18 +18,25 @@ good paper can be LLM-polished and a weak one handwritten.
 
 ## The result
 
-`tell_classifier`, a calibrated logistic regression over 16 stylometric features
-(sentence and word length distributions, lexical diversity, punctuation and
-function-word rates, hedges, boosters, transitions). Trained on content-controlled
-rewrite-pairs: each human arXiv section paired with an LLM twin that carries the
-same content in a different voice, so the model learns style, not topic. The split
-is grouped by paper (`pair_id`), never by row, so no paper appears on both sides.
+`tell_classifier`, a blend of two calibrated logistic members. The first scores
+16 stylometric tells (sentence and word length distributions, lexical diversity,
+punctuation and function-word rates, hedges, boosters, transitions) and supplies
+every per-tell explanation in the app. The second is a TF-IDF over character
+3-5 grams, the standard authorship-attribution representation, and supplies most
+of the discriminative power. Trained on content-controlled rewrite-pairs: each
+human arXiv section paired with an LLM twin that carries the same content in a
+different voice, so the model learns style, not topic. The split is grouped by
+`paper_id`, never by pair or row, so no paper appears on both sides: with
+char-ngrams a looser split would let the model memorize each paper's vocabulary
+and inflate the number.
 
-| metric | value |
+| metric (holdout: 17 papers, 140 pairs) | value |
 |---|---:|
-| ROC-AUC (holdout, 148 test pairs) | **0.866** |
-| precision / recall | 0.81 / 0.85 |
-| brier score | 0.148 |
+| ROC-AUC, blend | **0.986** |
+| ROC-AUC, char-ngram member alone | 0.985 |
+| ROC-AUC, 16-tell member alone | 0.858 |
+| precision / recall | 0.95 / 0.89 |
+| brier score | 0.054 |
 | blind baseline | 0.50 |
 
 Top tells by standardized weight: LLM-style prose runs longer and denser
@@ -66,7 +75,8 @@ flowchart LR
         twin --> tf
     end
     subgraph TR[Training]
-        tell --> fv{{tell_classifier_fv}}:::hops --> t[train calibrated logistic] --> reg[(Model Registry)]:::hops
+        tell --> fv{{tell_classifier_fv}}:::hops --> t[train tell + char-ngram blend] --> reg[(Model Registry)]:::hops
+        twin -. section text .-> t
     end
     subgraph INF[Inference]
         reg --> aud[auditor] --> dos[(paper_dossiers)]:::hops

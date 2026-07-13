@@ -28,7 +28,7 @@ if CODE_DIR not in sys.path:
     sys.path.insert(0, CODE_DIR)
 
 from arxiv_ingest import fetch_recent_ids  # noqa: E402
-from auditor import audit_paper, load_auditor  # noqa: E402
+from auditor import MODEL_VERSION, audit_paper, load_auditor  # noqa: E402
 
 # the four categories the spec targets
 CATEGORIES = ["cs.LG", "cs.CL", "stat.ML", "cs.AI"]
@@ -105,6 +105,9 @@ def main() -> None:
     ap.add_argument("--per-category", type=int, default=8, help="recent papers to pull per category")
     ap.add_argument("--categories", nargs="+", default=CATEGORIES)
     ap.add_argument("--skip-existing", action="store_true", help="skip papers already in paper_dossiers")
+    ap.add_argument("--rescore-existing", action="store_true",
+                    help="re-audit the papers already in paper_dossiers (after a model bump) "
+                         "instead of fetching recent ones")
     ap.add_argument("--gap", type=float, default=3.0, help="seconds between arXiv fetches (rate limit)")
     ap.add_argument("--flush-every", type=int, default=10)
     args = ap.parse_args()
@@ -113,19 +116,25 @@ def main() -> None:
     fs = project.get_feature_store()
 
     mr = project.get_model_registry()
-    model_dir = mr.get_model("tell_classifier", version=1).download()
+    model_dir = mr.get_model("tell_classifier", version=MODEL_VERSION).download()
     auditor = load_auditor(model_dir)
     print(f"loaded auditor from {model_dir}", flush=True)
 
-    # gather candidates: recent papers per category, deduped, id -> (title, category)
+    # gather candidates, id -> (title, category): either the stored dossiers
+    # (rescore after a model bump; upsert by paper_id) or recent papers per category
     candidates: dict[str, tuple[str, str]] = {}
-    for cat in args.categories:
-        try:
-            for p in fetch_recent_ids(cat, max_results=args.per_category):
-                candidates.setdefault(p["paper_id"], (p["title"], cat))
-        except Exception as e:
-            print(f"list {cat} failed: {str(e)[:120]}", flush=True)
-        time.sleep(args.gap)
+    if args.rescore_existing:
+        df = fs.get_feature_group("paper_dossiers", version=1).read()
+        for r in df.drop_duplicates(subset=["paper_id"]).itertuples():
+            candidates[r.paper_id] = (r.title, r.category)
+    else:
+        for cat in args.categories:
+            try:
+                for p in fetch_recent_ids(cat, max_results=args.per_category):
+                    candidates.setdefault(p["paper_id"], (p["title"], cat))
+            except Exception as e:
+                print(f"list {cat} failed: {str(e)[:120]}", flush=True)
+            time.sleep(args.gap)
 
     skip = _existing_ids(fs) if args.skip_existing else set()
     todo = [(pid, t, c) for pid, (t, c) in candidates.items() if pid not in skip]

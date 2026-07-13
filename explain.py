@@ -129,7 +129,7 @@ if __name__ == "__main__":
     mdir = os.environ.get("MODEL_DIR")
     if not mdir:
         import hopsworks
-        mdir = hopsworks.login().get_model_registry().get_model("tell_classifier", version=1).download()
+        mdir = hopsworks.login().get_model_registry().get_model("tell_classifier", version=auditor.MODEL_VERSION).download()
     aud = auditor.load_auditor(mdir)
     txt = sys.stdin.read() if not sys.stdin.isatty() else (
         "We propose a novel framework that leverages a comprehensive suite of "
